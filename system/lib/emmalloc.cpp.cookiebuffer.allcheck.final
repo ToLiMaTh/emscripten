@@ -105,6 +105,8 @@ static uint32_t getBufferSize() {
 	return ((uint32_t)(emscripten_random() * 0xF)) * MALLOC_ALIGNMENT; // multiple of 8 between 0 and 120
 }
 
+
+
 #pragma GCC diagnostic pop
 
 // A free region has the following structure:
@@ -282,38 +284,11 @@ static uint32_t size_of_region_from_ceiling(Region *r)
 }
 
 static void cookieCheck(Region *r) {
-//  MAIN_THREAD_ASYNC_EM_ASM(console.log('cookieCheck(ptr=0x'+($0>>>0).toString(16)+')'), r);
   // cookiecheck: nuke from orbit on failure
-  if (r->cookie != getHeapCookie()) {  	
-  	MAIN_THREAD_ASYNC_EM_ASM(console.log('cookieCheck: validation failed! killing process!'));
+  if (r->cookie != getHeapCookie()) {
   	MAIN_THREAD_ASYNC_EM_ASM(console.error('cookieCheck: validation failed! killing process!'));
   	_exit(1);
   }
-}
-
-// stuff for cookielist
-#define NUMBER_WATCHED_COOKIES 64
-static Region* cookieList[NUMBER_WATCHED_COOKIES];
-
-static void addToCookieList(Region * r) {
-//	MAIN_THREAD_ASYNC_EM_ASM(console.log('addToCookieList(ptr=0x'+($0>>>0).toString(16)+')'), r);
-	cookieList[((uintptr_t)r & (uintptr_t)511)>>3] = r; //511 = NUMBER_WATCHED_COOKIES * 8 -1
-}
-
-static void removeFromCookieList(Region * r) {
-	if (cookieList[((uintptr_t)r & (uintptr_t)511)>>3] == r) {
-//		MAIN_THREAD_ASYNC_EM_ASM(console.log('removeFromCookieList(ptr=0x'+($0>>>0).toString(16)+')'), r);
-		cookieList[((uintptr_t)r & (uintptr_t)511)>>3] = nullptr; 
-	}
-}
-
-static void verifyCookieList() {
-	for (Region* region : cookieList) {
-		if (region) {
-//			MAIN_THREAD_ASYNC_EM_ASM(console.log('verifyCookie(ptr=0x'+($0>>>0).toString(16)+')'), region);
-			cookieCheck(region); 
-		}
-	}
 }
 
 static bool debug_region_is_consistent(Region *r)
@@ -341,11 +316,9 @@ static void create_used_region(void *ptr, uint32_t size)
   assert(HAS_ALIGNMENT(ptr, sizeof(uint32_t)));
   assert(HAS_ALIGNMENT(size, sizeof(uint32_t)));
   assert(size >= sizeof(Region));
-//  MAIN_THREAD_ASYNC_EM_ASM(console.log('create used Region'));
   *(uint32_t*)ptr = getHeapCookie(); // insert cookie here
   ((uint32_t*)ptr)[1] = size;
   ((uint32_t*)ptr)[(size>>2)-1] = size;
-  addToCookieList((Region*)ptr); // add to cookielist
 }
 
 static void create_free_region(void *ptr, uint32_t size)
@@ -358,7 +331,6 @@ static void create_free_region(void *ptr, uint32_t size)
   freeRegion->cookie = getHeapCookie(); // insert cookie here
   freeRegion->size = size;
   ((uint32_t*)ptr)[(size>>2)-1] = size | FREE_REGION_FLAG;
-  addToCookieList(freeRegion); // add to cookielist
 }
 
 static void prepend_to_free_list(Region *region, Region *prependTo)
@@ -375,7 +347,6 @@ static void prepend_to_free_list(Region *region, Region *prependTo)
   prependTo->prev = region;
   region->prev->next = region;
   region->cookie = getHeapCookie(); // insert cookie here
-  addToCookieList(region); // add to cookielist
 }
 
 static void unlink_from_free_list(Region *region)
@@ -387,7 +358,6 @@ static void unlink_from_free_list(Region *region)
   region->prev->next = region->next;
   region->next->prev = region->prev;
   region->cookie = 0xdeadbeef; // remove cookie (unlink is always followed by create_used, create_free or prepend, so cookie will be re-added)
-  removeFromCookieList(region); // remove from cookielist
 }
 
 static void link_to_free_list(Region *freeRegion)
@@ -528,10 +498,14 @@ void EMMALLOC_EXPORT export_validate_memory_regions(void) {
 #ifdef EMMALLOC_VERBOSE
     MAIN_THREAD_ASYNC_EM_ASM(console.log('export_validate_memory_regions: starting validation'));
 #endif
-  verifyCookieList();
+  int returnValue = emmalloc_validate_memory_regions();
 #ifdef EMMALLOC_VERBOSE
     MAIN_THREAD_ASYNC_EM_ASM(console.log('export_validate_memory_regions: validation finished'));
 #endif
+  if (returnValue) {
+  	MAIN_THREAD_ASYNC_EM_ASM(console.error('export_validate_memory_regions: validation failed! killing process!'));
+  	_exit(1);
+  }
 }
 
 static bool claim_more_memory(size_t numBytes)
@@ -597,7 +571,6 @@ static bool claim_more_memory(size_t numBytes)
       //             ^^^
       //             Cookie we need to delete
       prevEndSentinel->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-      removeFromCookieList(prevEndSentinel); // remove previous endsentinel from cookielist
       
       return true;
     }
@@ -642,11 +615,6 @@ static void EMSCRIPTEN_KEEPALIVE __attribute__((constructor(0))) initialize_mall
   for(int i = 0; i < NUM_FREE_BUCKETS; ++i) {
     freeRegionBuckets[i].prev = freeRegionBuckets[i].next = &freeRegionBuckets[i];
     freeRegionBuckets[i].cookie = getHeapCookie(); // set cookie in bucketlist
-  }
-  
-  // clear cookielist (this might be a nuke from orbit)
-  for(int i = 0; i < NUMBER_WATCHED_COOKIES; ++i) {
-  	cookieList[i] = nullptr;
   }
 
 #ifdef EMMALLOC_VERBOSE
@@ -940,10 +908,9 @@ size_t EMMALLOC_EXPORT malloc_usable_size(void *ptr)
 void emmalloc_free(void *ptr)
 {
 // Always check cookies (or validate everything) when free is called
-#ifdef EMMALLOC_MEMVALIDATE
+//#ifdef EMMALLOC_MEMVALIDATE
   emmalloc_validate_memory_regions();
-#endif
-  verifyCookieList();
+//#endif
 
   if (!ptr)
     return;
@@ -993,7 +960,6 @@ void emmalloc_free(void *ptr)
     regionStartPtr = (uint8_t*)prevRegion;
     size += prevRegionSize;
     region->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-    removeFromCookieList(region); // remove from cookielist
   }
 
   // Check merging with right side
@@ -1003,12 +969,11 @@ void emmalloc_free(void *ptr)
     cookieCheck(nextRegion); // cookiecheck
 #endif
   uint32_t sizeAtEnd = *(uint32_t*)region_payload_end_ptr(nextRegion);
-  if (nextRegion->size != sizeAtEnd) // Next region is free?
+  if (nextRegion->size != sizeAtEnd) // Next region is feee?
   {
     unlink_from_free_list(nextRegion);
     size += nextRegion->size;
     //nextRegion->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-    // ^ already done by unink
   }
 
   create_free_region(regionStartPtr, size);

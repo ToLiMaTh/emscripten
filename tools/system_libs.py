@@ -66,6 +66,12 @@ def get_base_cflags(force_object_files=False):
     flags += ['-s', 'RELOCATABLE']
   if shared.Settings.MEMORY64:
     flags += ['-s', 'MEMORY64=' + str(shared.Settings.MEMORY64)]
+    
+  # wasm syslibs flags
+#  flags += ['-mllvm', '-tlmt-disable-rodata-check']
+#  flags += ['-mllvm', '-tlmt-enable-additional-hc']
+
+
   return flags
 
 
@@ -165,6 +171,11 @@ def get_wasm_libc_rt_files():
   iprintf_files += files_in_path(
     path_components=['system', 'lib', 'libc', 'musl', 'src', 'string'],
     filenames=['strlen.c'])
+  # Add stackstuff here because nev gets included down below
+#  print("Adding stackstuff.c")
+#  other_files += files_in_path(
+#    path_components=['system', 'lib'],
+#    filenames=['stackstuff.c'])
   return math_files + other_files + iprintf_files
 
 
@@ -639,6 +650,9 @@ class libcompiler_rt(MTLibrary):
   src_files.append(shared.path_from_root('system', 'lib', 'compiler-rt', 'stack_limits.S'))
   src_files.append(shared.path_from_root('system', 'lib', 'compiler-rt', 'emscripten_setjmp.c'))
   src_files.append(shared.path_from_root('system', 'lib', 'compiler-rt', 'emscripten_exception_builtins.c'))
+  #stackstuff
+#  src_files.append(shared.path_from_root('system', 'lib', 'stackstuff.c'))
+  
 
 
 class libc(AsanInstrumentedLibrary, MuslInternalLibrary, MTLibrary):
@@ -724,7 +738,11 @@ class libc(AsanInstrumentedLibrary, MuslInternalLibrary, MTLibrary):
 
     libc_files += files_in_path(
         path_components=['system', 'lib', 'libc', 'musl', 'src', 'env'],
-        filenames=['__environ.c', 'getenv.c', 'putenv.c', 'setenv.c', 'unsetenv.c'])
+        filenames=['__environ.c', 'getenv.c', 'putenv.c', 'setenv.c', 'unsetenv.c']) #s_c_f is missing here
+        
+#    libc_files += files_in_path(
+#        path_components=['system', 'lib'],
+#        filenames=['stackstuff.c']) #stackstuff here
 
     libc_files += files_in_path(
         path_components=['system', 'lib', 'libc', 'musl', 'src', 'sched'],

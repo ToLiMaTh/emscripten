@@ -52,8 +52,7 @@
 #include <emscripten/trace.h>
 #endif
 
-// #define EMMALLOC_VERBOSE 1
-// #define EMMALLOC_MEMVALIDATE 1
+//#define EMMALLOC_VERBOSE 1
 
 // Behavior of right shifting a signed integer is compiler implementation defined.
 static_assert((((int32_t)0x80000000U) >> 31) == -1, "This malloc implementation requires that right-shifting a signed integer produces a sign-extending (arithmetic) shift!");
@@ -83,36 +82,11 @@ extern "C"
 // in the size field. I.e. for free regions, the size field is odd, and for used regions, the size field reads even.
 #define FREE_REGION_FLAG 0x1u
 
-// Field for heap cookie
-static uint32_t heapCookie = 0;
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wimplicit-const-int-float-conversion"
-
-// Helper function to access heap cookie
-static uint32_t getHeapCookie() {
- //       if (!heapCookie) heapCookie = (uint32_t)(emscripten_random() * 0xFFFFFFFF);
-        return heapCookie;
-}
-
-// Split setting of heapCookie into seperate function for performance
-static void setHeapCookie() {
-	heapCookie = (uint32_t)(emscripten_random() * 0xFFFFFFFF);
-}
-
-// Helper functtion to get additional buffer size
-static uint32_t getBufferSize() {
-	return ((uint32_t)(emscripten_random() * 0xF)) * MALLOC_ALIGNMENT; // multiple of 8 between 0 and 120
-}
-
-#pragma GCC diagnostic pop
-
 // A free region has the following structure:
 // <size:uint32_t> <prevptr> <nextptr> ... <size:uint32_t>
 
 struct Region
 {
-  uint32_t cookie; //add cookie field
   uint32_t size;
   // Use a circular doubly linked list to represent free region data.
   Region *prev, *next;
@@ -159,8 +133,8 @@ static Region freeRegionBuckets[NUM_FREE_BUCKETS];
 // that contains free memory of desired size.
 static BUCKET_BITMASK_T freeRegionBucketsUsed = 0;
 
-// Amount of bytes taken up by allocation header data // cookie + size + size
-#define REGION_HEADER_SIZE (3*sizeof(uint32_t))
+// Amount of bytes taken up by allocation header data
+#define REGION_HEADER_SIZE (2*sizeof(uint32_t))
 
 // Smallest allocation size that is possible is 2*pointer size, since payload of each region must at least contain space
 // to store the free region linked list prev and next pointers. An allocation size smaller than this will be rounded up
@@ -281,53 +255,17 @@ static uint32_t size_of_region_from_ceiling(Region *r)
   return DECODE_CEILING_SIZE(size);
 }
 
-static void cookieCheck(Region *r) {
-//  MAIN_THREAD_ASYNC_EM_ASM(console.log('cookieCheck(ptr=0x'+($0>>>0).toString(16)+')'), r);
-  // cookiecheck: nuke from orbit on failure
-  if (r->cookie != getHeapCookie()) {  	
-  	MAIN_THREAD_ASYNC_EM_ASM(console.log('cookieCheck: validation failed! killing process!'));
-  	MAIN_THREAD_ASYNC_EM_ASM(console.error('cookieCheck: validation failed! killing process!'));
-  	_exit(1);
-  }
-}
-
-// stuff for cookielist
-#define NUMBER_WATCHED_COOKIES 64
-static Region* cookieList[NUMBER_WATCHED_COOKIES];
-
-static void addToCookieList(Region * r) {
-//	MAIN_THREAD_ASYNC_EM_ASM(console.log('addToCookieList(ptr=0x'+($0>>>0).toString(16)+')'), r);
-	cookieList[((uintptr_t)r & (uintptr_t)511)>>3] = r; //511 = NUMBER_WATCHED_COOKIES * 8 -1
-}
-
-static void removeFromCookieList(Region * r) {
-	if (cookieList[((uintptr_t)r & (uintptr_t)511)>>3] == r) {
-//		MAIN_THREAD_ASYNC_EM_ASM(console.log('removeFromCookieList(ptr=0x'+($0>>>0).toString(16)+')'), r);
-		cookieList[((uintptr_t)r & (uintptr_t)511)>>3] = nullptr; 
-	}
-}
-
-static void verifyCookieList() {
-	for (Region* region : cookieList) {
-		if (region) {
-//			MAIN_THREAD_ASYNC_EM_ASM(console.log('verifyCookie(ptr=0x'+($0>>>0).toString(16)+')'), region);
-			cookieCheck(region); 
-		}
-	}
-}
-
 static bool debug_region_is_consistent(Region *r)
 {
   assert(r);
   uint32_t sizeAtBottom = r->size;
   uint32_t sizeAtCeiling = size_of_region_from_ceiling(r);
-  cookieCheck(r);
   return sizeAtBottom == sizeAtCeiling;
 }
 
 static uint8_t *region_payload_start_ptr(Region *region)
 {
-  return (uint8_t*)region + sizeof(uint32_t) + sizeof(uint32_t); // start + cookie + size
+  return (uint8_t*)region + sizeof(uint32_t);
 }
 
 static uint8_t *region_payload_end_ptr(Region *region)
@@ -341,11 +279,8 @@ static void create_used_region(void *ptr, uint32_t size)
   assert(HAS_ALIGNMENT(ptr, sizeof(uint32_t)));
   assert(HAS_ALIGNMENT(size, sizeof(uint32_t)));
   assert(size >= sizeof(Region));
-//  MAIN_THREAD_ASYNC_EM_ASM(console.log('create used Region'));
-  *(uint32_t*)ptr = getHeapCookie(); // insert cookie here
-  ((uint32_t*)ptr)[1] = size;
+  *(uint32_t*)ptr = size;
   ((uint32_t*)ptr)[(size>>2)-1] = size;
-  addToCookieList((Region*)ptr); // add to cookielist
 }
 
 static void create_free_region(void *ptr, uint32_t size)
@@ -355,10 +290,8 @@ static void create_free_region(void *ptr, uint32_t size)
   assert(HAS_ALIGNMENT(size, sizeof(uint32_t)));
   assert(size >= sizeof(Region));
   Region *freeRegion = (Region*)ptr;
-  freeRegion->cookie = getHeapCookie(); // insert cookie here
   freeRegion->size = size;
   ((uint32_t*)ptr)[(size>>2)-1] = size | FREE_REGION_FLAG;
-  addToCookieList(freeRegion); // add to cookielist
 }
 
 static void prepend_to_free_list(Region *region, Region *prependTo)
@@ -374,8 +307,6 @@ static void prepend_to_free_list(Region *region, Region *prependTo)
   assert(region->prev);
   prependTo->prev = region;
   region->prev->next = region;
-  region->cookie = getHeapCookie(); // insert cookie here
-  addToCookieList(region); // add to cookielist
 }
 
 static void unlink_from_free_list(Region *region)
@@ -386,8 +317,6 @@ static void unlink_from_free_list(Region *region)
   assert(region->next);
   region->prev->next = region->next;
   region->next->prev = region->prev;
-  region->cookie = 0xdeadbeef; // remove cookie (unlink is always followed by create_used, create_free or prepend, so cookie will be re-added)
-  removeFromCookieList(region); // remove from cookielist
 }
 
 static void link_to_free_list(Region *freeRegion)
@@ -413,7 +342,7 @@ static void dump_memory_regions()
   {
     Region *r = root;
     assert(debug_region_is_consistent(r));
-    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[3]); // end/next: account for cookie
+    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[2]);
     MAIN_THREAD_ASYNC_EM_ASM(console.log('Region block 0x'+($0>>>0).toString(16)+' - 0x'+($1>>>0).toString(16)+ ' ('+($2>>>0)+' bytes):'),
       r, lastRegionEnd, lastRegionEnd-(uint8_t*)r);
     while((uint8_t*)r < lastRegionEnd)
@@ -429,7 +358,7 @@ static void dump_memory_regions()
         break;
       r = next_region(r);
     }
-    root = ((Region*)((uint32_t*)root)[2]); // prev: account for cookie
+    root = ((Region*)((uint32_t*)root)[1]);
     MAIN_THREAD_ASYNC_EM_ASM(console.log(""));
   }
   MAIN_THREAD_ASYNC_EM_ASM(console.log('Free regions:'));
@@ -464,9 +393,6 @@ void emmalloc_dump_memory_regions()
 static int validate_memory_regions()
 {
   ASSERT_MALLOC_IS_ACQUIRED();
-#ifdef EMMALLOC_VERBOSE
-    MAIN_THREAD_ASYNC_EM_ASM(console.log('validate_memory_regions: starting validation'));
-#endif
   Region *root = listOfAllRegions;
   while(root)
   {
@@ -477,7 +403,7 @@ static int validate_memory_regions()
         r, r->size, region_ceiling_size(r) == r->size);
       return 1;
     }
-    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[3]); // next/end: account for cookie
+    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[2]);
     while((uint8_t*)r < lastRegionEnd)
     {
       if (!debug_region_is_consistent(r))
@@ -490,7 +416,7 @@ static int validate_memory_regions()
         break;
       r = next_region(r);
     }
-    root = ((Region*)((uint32_t*)root)[2]); // prev: account for cookie 
+    root = ((Region*)((uint32_t*)root)[1]);
   }
   for(int i = 0; i < NUM_FREE_BUCKETS; ++i)
   {
@@ -508,9 +434,6 @@ static int validate_memory_regions()
       fr = fr->next;
     }
   }
-#ifdef EMMALLOC_VERBOSE
-    MAIN_THREAD_ASYNC_EM_ASM(console.log('validate_memory_regions: validation finished successfully!'));
-#endif
   return 0;
 }
 
@@ -520,18 +443,6 @@ int emmalloc_validate_memory_regions()
   int memoryError = validate_memory_regions();
   MALLOC_RELEASE();
   return memoryError;
-}
-
-
-
-void EMMALLOC_EXPORT export_validate_memory_regions(void) {
-#ifdef EMMALLOC_VERBOSE
-    MAIN_THREAD_ASYNC_EM_ASM(console.log('export_validate_memory_regions: starting validation'));
-#endif
-  verifyCookieList();
-#ifdef EMMALLOC_VERBOSE
-    MAIN_THREAD_ASYNC_EM_ASM(console.log('export_validate_memory_regions: validation finished'));
-#endif
 }
 
 static bool claim_more_memory(size_t numBytes)
@@ -565,22 +476,16 @@ static bool claim_more_memory(size_t numBytes)
 
   // If we are the sole user of sbrk(), it will feed us continuous/consecutive memory addresses - take advantage
   // of that if so: instead of creating two disjoint memory regions blocks, expand the previous one to a larger size.
-  uint8_t *previousSbrkEndAddress = listOfAllRegions ? (uint8_t*)((uint32_t*)listOfAllRegions)[3] : 0; // next/end: account for cookie
+  uint8_t *previousSbrkEndAddress = listOfAllRegions ? (uint8_t*)((uint32_t*)listOfAllRegions)[2] : 0;
   if (startPtr == previousSbrkEndAddress)
   {
     Region *prevEndSentinel = prev_region((Region*)startPtr);
     assert(debug_region_is_consistent(prevEndSentinel));
-#ifdef NDEBUG
-    cookieCheck(prevEndSentinel); // cookiecheck
-#endif
     assert(region_is_in_use(prevEndSentinel));
     Region *prevRegion = prev_region(prevEndSentinel);
     assert(debug_region_is_consistent(prevRegion));
-#ifdef NDEBUG
-    cookieCheck(prevRegion); // cookiecheck
-#endif
 
-    ((uint32_t*)listOfAllRegions)[3] = (uint32_t)endPtr; // next/end: account for cookie
+    ((uint32_t*)listOfAllRegions)[2] = (uint32_t)endPtr;
 
     // Two scenarios, either the last region of the previous block was in use, in which case we need to create
     // a new free region in the newly allocated space; or it was free, in which case we can extend that region
@@ -591,14 +496,6 @@ static bool claim_more_memory(size_t numBytes)
       unlink_from_free_list(prevRegion);
       create_free_region(prevRegion, newFreeRegionSize);
       link_to_free_list(prevRegion);
-      
-      // Was: [Free][EndSentinel][---new space---][EndSentinel]
-      // Now: [Free------------------------------][EndSentinel]
-      //             ^^^
-      //             Cookie we need to delete
-      prevEndSentinel->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-      removeFromCookieList(prevEndSentinel); // remove previous endsentinel from cookielist
-      
       return true;
     }
     // else: last region of the previous block was in use. Since we are joining two consecutive sbrk() blocks,
@@ -612,8 +509,8 @@ static bool claim_more_memory(size_t numBytes)
 
     // Dynamic heap start region:
     Region *newRegionBlock = (Region*)startPtr;
-    ((uint32_t*)newRegionBlock)[2] = (uint32_t)listOfAllRegions; // Pointer to next region block head // account for cookie
-    ((uint32_t*)newRegionBlock)[3] = (uint32_t)endPtr; // Pointer to the end address of this region block // account for cookie
+    ((uint32_t*)newRegionBlock)[1] = (uint32_t)listOfAllRegions; // Pointer to next region block head
+    ((uint32_t*)newRegionBlock)[2] = (uint32_t)endPtr; // Pointer to the end address of this region block
     listOfAllRegions = newRegionBlock;
     startPtr += sizeof(Region);
   }
@@ -634,20 +531,10 @@ static void EMSCRIPTEN_KEEPALIVE __attribute__((constructor(0))) initialize_mall
   assert(emscripten_is_main_runtime_thread());
 #endif
 
-  // Initialize heapCookie
-  setHeapCookie();
-
   // Initialize circular doubly linked lists representing free space
 #pragma clang loop unroll(disable) // Never useful to unroll this for loop, just takes up code size.
-  for(int i = 0; i < NUM_FREE_BUCKETS; ++i) {
+  for(int i = 0; i < NUM_FREE_BUCKETS; ++i)
     freeRegionBuckets[i].prev = freeRegionBuckets[i].next = &freeRegionBuckets[i];
-    freeRegionBuckets[i].cookie = getHeapCookie(); // set cookie in bucketlist
-  }
-  
-  // clear cookielist (this might be a nuke from orbit)
-  for(int i = 0; i < NUMBER_WATCHED_COOKIES; ++i) {
-  	cookieList[i] = nullptr;
-  }
 
 #ifdef EMMALLOC_VERBOSE
   MAIN_THREAD_ASYNC_EM_ASM(console.log('initialize_malloc_heap()'));
@@ -722,8 +609,7 @@ static void *attempt_allocate(Region *freeRegion, size_t alignment, size_t size)
     // There is not enough space to split the free memory region into used+free parts, so consume the whole
     // region as used memory, not leaving a free memory region behind.
     // Initialize the free region as used by resetting the ceiling size to the same value as the size at bottom.
-//    ((uint32_t*)((uint8_t*)freeRegion + freeRegion->size))[-1] = freeRegion->size;
-    create_used_region(freeRegion, freeRegion->size);
+    ((uint32_t*)((uint8_t*)freeRegion + freeRegion->size))[-1] = freeRegion->size;
   }
 
 #ifdef __EMSCRIPTEN_TRACING__
@@ -734,7 +620,7 @@ static void *attempt_allocate(Region *freeRegion, size_t alignment, size_t size)
   MAIN_THREAD_ASYNC_EM_ASM(console.log('attempt_allocate - succeeded allocating memory, region ptr=0x' + ($0>>>0).toString(16) + ', align=' + $1 + ', payload size=' + ($2>>>0) + ' bytes)'), freeRegion, alignment, size);
 #endif
 
-  return (uint8_t*)freeRegion + sizeof(uint32_t) + sizeof(uint32_t); // account for cookie
+  return (uint8_t*)freeRegion + sizeof(uint32_t);
 }
 
 static size_t validate_alloc_alignment(size_t alignment)
@@ -903,7 +789,7 @@ void * EMMALLOC_EXPORT aligned_alloc(size_t alignment, size_t size)
 
 void *emmalloc_malloc(size_t size)
 {
-  return emmalloc_memalign(MALLOC_ALIGNMENT, size+getBufferSize()); // add buffer
+  return emmalloc_memalign(MALLOC_ALIGNMENT, size);
 }
 extern __typeof(emmalloc_malloc) emscripten_builtin_malloc __attribute__((alias("emmalloc_malloc")));
 
@@ -917,7 +803,7 @@ size_t emmalloc_usable_size(void *ptr)
   if (!ptr)
     return 0;
 
-  uint8_t *regionStartPtr = (uint8_t*)ptr - sizeof(uint32_t) - sizeof(uint32_t); // account for cookie
+  uint8_t *regionStartPtr = (uint8_t*)ptr - sizeof(uint32_t);
   Region *region = (Region*)(regionStartPtr);
   assert(HAS_ALIGNMENT(region, sizeof(uint32_t)));
 
@@ -939,11 +825,9 @@ size_t EMMALLOC_EXPORT malloc_usable_size(void *ptr)
 
 void emmalloc_free(void *ptr)
 {
-// Always check cookies (or validate everything) when free is called
 #ifdef EMMALLOC_MEMVALIDATE
   emmalloc_validate_memory_regions();
 #endif
-  verifyCookieList();
 
   if (!ptr)
     return;
@@ -952,7 +836,7 @@ void emmalloc_free(void *ptr)
   MAIN_THREAD_ASYNC_EM_ASM(console.log('free(ptr=0x'+($0>>>0).toString(16)+')'), ptr);
 #endif
 
-  uint8_t *regionStartPtr = (uint8_t*)ptr - sizeof(uint32_t) - sizeof(uint32_t); // payload - size - cookie
+  uint8_t *regionStartPtr = (uint8_t*)ptr - sizeof(uint32_t);
   Region *region = (Region*)(regionStartPtr);
   assert(HAS_ALIGNMENT(region, sizeof(uint32_t)));
 
@@ -977,8 +861,6 @@ void emmalloc_free(void *ptr)
   emscripten_trace_record_free(region);
 #endif
 
-  cookieCheck(region); // cookiecheck
-
   // Check merging with left side
   uint32_t prevRegionSizeField = ((uint32_t*)region)[-1];
   uint32_t prevRegionSize = prevRegionSizeField & ~FREE_REGION_FLAG;
@@ -986,29 +868,19 @@ void emmalloc_free(void *ptr)
   {
     Region *prevRegion = (Region*)((uint8_t*)region - prevRegionSize);
     assert(debug_region_is_consistent(prevRegion));
-#ifdef NDEBUG
-    cookieCheck(prevRegion); // cookiecheck
-#endif
     unlink_from_free_list(prevRegion);
     regionStartPtr = (uint8_t*)prevRegion;
     size += prevRegionSize;
-    region->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-    removeFromCookieList(region); // remove from cookielist
   }
 
   // Check merging with right side
   Region *nextRegion = next_region(region);
   assert(debug_region_is_consistent(nextRegion));
-#ifdef NDEBUG
-    cookieCheck(nextRegion); // cookiecheck
-#endif
   uint32_t sizeAtEnd = *(uint32_t*)region_payload_end_ptr(nextRegion);
-  if (nextRegion->size != sizeAtEnd) // Next region is free?
+  if (nextRegion->size != sizeAtEnd)
   {
     unlink_from_free_list(nextRegion);
     size += nextRegion->size;
-    //nextRegion->cookie = 0xdeadbeef; // overwrite cookie to prevent leakage (this might become payload)
-    // ^ already done by unink
   }
 
   create_free_region(regionStartPtr, size);
@@ -1124,7 +996,7 @@ void *emmalloc_aligned_realloc(void *ptr, size_t alignment, size_t size)
   size = validate_alloc_size(size);
 
   // Calculate the region start address of the original allocation
-  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t)- sizeof(uint32_t)); // account for cookie
+  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t));
 
   // First attempt to resize the given region to avoid having to copy memory around
   if (acquire_and_attempt_region_resize(region, size + REGION_HEADER_SIZE))
@@ -1148,7 +1020,7 @@ void *emmalloc_aligned_realloc(void *ptr, size_t alignment, size_t size)
 
 void * EMMALLOC_EXPORT aligned_realloc(void *ptr, size_t alignment, size_t size)
 {
-  return emmalloc_aligned_realloc(ptr, alignment, size+getBufferSize()); // adjust for buffer
+  return emmalloc_aligned_realloc(ptr, alignment, size);
 }
 
 // realloc_try() is like realloc(), but only attempts to try to resize the existing memory
@@ -1168,7 +1040,7 @@ void *emmalloc_realloc_try(void *ptr, size_t size)
   size = validate_alloc_size(size);
 
   // Calculate the region start address of the original allocation
-  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t) - sizeof(uint32_t)); // account for cookie
+  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t));
 
   // Attempt to resize the given region to avoid having to copy memory around
   int success = acquire_and_attempt_region_resize(region, size + REGION_HEADER_SIZE);
@@ -1195,7 +1067,7 @@ void *emmalloc_aligned_realloc_uninitialized(void *ptr, size_t alignment, size_t
   size = validate_alloc_size(size);
 
   // Calculate the region start address of the original allocation
-  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t) - sizeof(uint32_t)); // account for cookie
+  Region *region = (Region*)((uint8_t*)ptr - sizeof(uint32_t));
 
   // First attempt to resize the given region to avoid having to copy memory around
   if (acquire_and_attempt_region_resize(region, size + REGION_HEADER_SIZE))
@@ -1214,7 +1086,7 @@ void *emmalloc_aligned_realloc_uninitialized(void *ptr, size_t alignment, size_t
 
 void *emmalloc_realloc(void *ptr, size_t size)
 {
-  return emmalloc_aligned_realloc(ptr, MALLOC_ALIGNMENT, size+getBufferSize()); // adjust for buffer
+  return emmalloc_aligned_realloc(ptr, MALLOC_ALIGNMENT, size);
 }
 
 void * EMMALLOC_EXPORT realloc(void *ptr, size_t size)
@@ -1308,7 +1180,7 @@ struct mallinfo emmalloc_mallinfo()
   info.fordblks = 0; // The total number of bytes in free blocks.
   // The total amount of releasable free space at the top of the heap.
   // This is the maximum number of bytes that could ideally be released by malloc_trim(3).
-  Region *lastActualRegion = prev_region((Region*)((uint8_t*)((uint32_t*)listOfAllRegions)[3] - sizeof(Region))); // account for cookie
+  Region *lastActualRegion = prev_region((Region*)((uint8_t*)((uint32_t*)listOfAllRegions)[2] - sizeof(Region)));
   info.keepcost = region_is_free(lastActualRegion) ? lastActualRegion->size : 0;
 
   Region *root = listOfAllRegions;
@@ -1316,7 +1188,7 @@ struct mallinfo emmalloc_mallinfo()
   {
     Region *r = root;
     assert(debug_region_is_consistent(r));
-    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[3]); // next/end: account for cookie
+    uint8_t *lastRegionEnd = (uint8_t*)(((uint32_t*)root)[2]);
     while((uint8_t*)r < lastRegionEnd)
     {
       assert(debug_region_is_consistent(r));
@@ -1339,7 +1211,7 @@ struct mallinfo emmalloc_mallinfo()
         break;
       r = next_region(r);
     }
-    root = ((Region*)((uint32_t*)root)[2]); // prev: account for cookie
+    root = ((Region*)((uint32_t*)root)[1]);
   }
 
   MALLOC_RELEASE();
@@ -1359,10 +1231,10 @@ static int trim_dynamic_heap_reservation(size_t pad)
 
   if (!listOfAllRegions)
     return 0; // emmalloc is not controlling any dynamic memory at all - cannot release memory.
-  uint32_t *previousSbrkEndAddress = (uint32_t*)((uint32_t*)listOfAllRegions)[3]; // end/next: account for cookie
+  uint32_t *previousSbrkEndAddress = (uint32_t*)((uint32_t*)listOfAllRegions)[2];
   assert(sbrk(0) == previousSbrkEndAddress);
   uint32_t lastMemoryRegionSize = previousSbrkEndAddress[-1];
-  assert(lastMemoryRegionSize == 16); // // The last memory region should be a sentinel node of exactly 20 bytes in size. // account for cookie
+  assert(lastMemoryRegionSize == 16); // // The last memory region should be a sentinel node of exactly 16 bytes in size.
   Region *endSentinelRegion = (Region*)((uint8_t*)previousSbrkEndAddress - sizeof(Region));
   Region *lastActualRegion = prev_region(endSentinelRegion);
 
@@ -1426,9 +1298,9 @@ size_t emmalloc_dynamic_heap_size()
   while(root)
   {
     Region *r = root;
-    uintptr_t blockEndPtr = ((uint32_t*)r)[3]; // next/end: account for cookie
+    uintptr_t blockEndPtr = ((uint32_t*)r)[2];
     dynamicHeapSize += blockEndPtr - (uintptr_t)r;
-    root = ((Region*)((uint32_t*)root)[2]); // prev: account for cookie
+    root = ((Region*)((uint32_t*)root)[1]);
   }
   MALLOC_RELEASE();
   return dynamicHeapSize;

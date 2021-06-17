@@ -22,3 +22,7 @@ htmlcov/
 coverage.xml
 
 .DS_Store
+
+# Ignore dir used for testing and developement
+/wasmfiles
+

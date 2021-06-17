@@ -201,12 +201,18 @@ class EmscriptenBenchmarker(Benchmarker):
     try_delete(final)
     cmd = [
       EMCC, filename,
-      OPTIMIZATIONS,
+      '/home/tobi/ma/emscripten/stackstuff.c',
+#      OPTIMIZATIONS,
       '-s', 'INITIAL_MEMORY=256MB',
       '-s', 'FILESYSTEM=0',
       '--closure', '1',
       '-s', 'MINIMAL_RUNTIME',
       '-s', 'BENCHMARK=%d' % (1 if IGNORE_COMPILATION and not has_output_parser else 0),
+      '-s', 'MALLOC=emmalloc',  #add my malloc here
+      '-mllvm', '-tlmt-enable-sp',
+      '-mllvm', '-tlmt-disable-additional-sp',
+#      '-mllvm', '-tlmt-disable-rodata-check',
+#      '-mllvm', '-tlmt-enable-additional-hc',
       '-o', final
     ] + shared_args + emcc_args + LLVM_FEATURE_FLAGS + self.extra_args
     if 'FORCE_FILESYSTEM=1' in cmd:
@@ -214,6 +220,7 @@ class EmscriptenBenchmarker(Benchmarker):
     if PROFILING:
       cmd += ['--profiling-funcs']
     self.cmd = cmd
+    print(cmd);
     run_process(cmd, env=self.env)
     if self.binaryen_opts:
       run_binaryen_opts(final[:-3] + '.wasm', self.binaryen_opts)
@@ -364,7 +371,7 @@ if config.V8_ENGINE and config.V8_ENGINE in config.JS_ENGINES:
   default_v8_name = os.environ.get('EMBENCH_NAME') or 'v8'
   benchmarkers += [
     EmscriptenBenchmarker(default_v8_name, aot_v8),
-    EmscriptenBenchmarker(default_v8_name + '-lto', aot_v8, ['-flto']),
+#    EmscriptenBenchmarker(default_v8_name + '-lto', aot_v8, ['-flto']),
     # EmscriptenWasm2CBenchmarker('wasm2c')
   ]
   if os.path.exists(CHEERP_BIN):
